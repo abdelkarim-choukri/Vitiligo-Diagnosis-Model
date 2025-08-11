@@ -1,0 +1,8 @@
+torch
+torchvision
+albumentations
+segmentation-models-pytorch
+scikit-learn
+pyyaml
+tqdm
+Pillow
