@@ -1,0 +1,16 @@
+OOF ROC-AUC: 0.5645
+OOF PR-AUC : 0.2126
+Chosen threshold: inf
+Confusion matrix (OOF):
+[[31  0]
+ [ 6  0]]
+
+              precision    recall  f1-score   support
+
+         0.0      0.838     1.000     0.912        31
+         1.0      0.000     0.000     0.000         6
+
+    accuracy                          0.838        37
+   macro avg      0.419     0.500     0.456        37
+weighted avg      0.702     0.838     0.764        37
+
