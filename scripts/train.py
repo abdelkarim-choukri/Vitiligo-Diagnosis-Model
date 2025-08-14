@@ -58,7 +58,8 @@ def train_one_epoch(
         optim.zero_grad(set_to_none=True)
 
         with autocast(dtype=amp_dtype):
-            logits = clf(cli, woo).squeeze(1)          # [B]
+            
+            logits = clf(cli, woo)  # [B]         # [B]
             loss = crit_cls(logits, label)
 
             if seg is not None:
@@ -94,7 +95,8 @@ def validate(
         cli, woo = cli.to(device, non_blocking=True), woo.to(device, non_blocking=True)
 
         # classification
-        logits = clf(cli, woo).squeeze(1)
+        
+        logits = clf(cli, woo)
         probs = torch.sigmoid(logits).cpu().numpy()
         preds = (probs >= 0.5).astype(int)
 
@@ -135,86 +137,335 @@ def validate(
     return metrics
 
 
+# def main():
+#     import argparse, os, numpy as np, torch
+#     import torch.nn as nn
+#     from torch.utils.data import DataLoader
+#     from torch.cuda.amp import GradScaler  # keep legacy API to match your train/validate
+
+#     parser = argparse.ArgumentParser()
+#     parser.add_argument("--config", type=str, default="config/config.yaml")
+#     args = parser.parse_args()
+
+#     cfg = load_config(args.config)
+
+#     # device & speed knobs
+#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+#     torch.backends.cudnn.benchmark = True
+#     try:
+#         torch.set_float32_matmul_precision("high")  # safe no-op on CPU/older GPUs
+#     except Exception:
+#         pass
+
+#     # paths
+#     model_dir   = cfg["paths"]["model_dir"]
+#     results_dir = cfg["paths"]["results_dir"]
+#     ensure_dir(model_dir); ensure_dir(results_dir)
+
+#     # -----------------------------------
+#     # DATA
+#     # -----------------------------------
+#     # Paired augmentations for train (same geom/color on clinical & wood)
+#     try:
+#         import cv2
+#         import albumentations as A
+#         image_size = int(cfg["data"]["image_size"])
+#         tfm = A.Compose([
+#             A.RandomResizedCrop(size=(image_size, image_size),
+#                                 scale=(0.85, 1.0), ratio=(0.9, 1.1), p=0.7),
+#             A.ShiftScaleRotate(shift_limit=0.02, scale_limit=0.10, rotate_limit=10,
+#                                border_mode=cv2.BORDER_CONSTANT, value=0, p=0.7),
+#             A.HorizontalFlip(p=0.5),
+#             A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05, p=0.4),
+#         ], additional_targets={'image2': 'image'})
+#     except Exception as e:
+#         print(f"[warn] Albumentations not available/compatible ({e}); continuing without train-time augs.")
+#         tfm = None
+#         image_size = int(cfg["data"]["image_size"])
+
+#     train_ds = VitiligoDataset(
+#         csv_file=cfg["data"]["train_csv"],
+#         clinical_dir=cfg["data"]["clinical_dir"],
+#         wood_dir=cfg["data"]["wood_dir"],
+#         mask_dir=cfg["data"].get("mask_dir", None),
+#         transform=tfm,                          # augs ON for train
+#         image_size=image_size,
+#     )
+#     val_ds = VitiligoDataset(
+#         csv_file=cfg["data"]["val_csv"],
+#         clinical_dir=cfg["data"]["clinical_dir"],
+#         wood_dir=cfg["data"]["wood_dir"],
+#         mask_dir=cfg["data"].get("mask_dir", None),
+#         transform=None,                         # augs OFF for val
+#         image_size=image_size,
+#     )
+
+#     # DataLoaders
+#     num_workers = int(os.environ.get("NUM_WORKERS", "8"))
+#     bs          = int(cfg["training"]["batch_size"])
+#     persist     = (num_workers > 0)  # must be False when num_workers==0
+
+#     train_loader = DataLoader(
+#         train_ds, batch_size=bs, shuffle=True,
+#         num_workers=num_workers, pin_memory=True, persistent_workers=persist
+#     )
+#     val_loader = DataLoader(
+#         val_ds, batch_size=bs, shuffle=False,
+#         num_workers=num_workers, pin_memory=True, persistent_workers=persist
+#     )
+
+#     # -----------------------------------
+#     # MODELS
+#     # -----------------------------------
+#     clf = DualEfficientNetClassifier(
+#         use_cbam=cfg["model"].get("use_cbam", False)
+#     ).to(device)
+
+#     seg_model = None
+#     mask_dir  = cfg["data"].get("mask_dir", None)
+#     if mask_dir and str(mask_dir).lower() != "null":
+#         seg_model = DualInputSegmentationUNet(
+#             encoder_name=cfg["model"].get("encoder_name", "efficientnet-b0"),
+#             encoder_weights=cfg["model"].get("encoder_weights", "imagenet"),
+#         ).to(device)
+
+#     # -----------------------------------
+#     # LOSSES (handle class imbalance)
+#     # -----------------------------------
+#     try:
+#         import pandas as _pd
+#         _df  = _pd.read_csv(cfg["data"]["train_csv"])
+#         _neg = int((_df["label"] == 0).sum())
+#         _pos = int((_df["label"] == 1).sum())
+#         _pw  = float(_neg / max(_pos, 1)) if _pos > 0 else 1.0
+#         print(f"[info] pos_weight={_pw:.3f}  (neg={_neg}, pos={_pos})")
+#         pos_weight = torch.tensor([_pw], device=device)
+#     except Exception as e:
+#         print(f"[warn] could not compute pos_weight ({e}); using 1.0")
+#         pos_weight = torch.tensor([1.0], device=device)
+
+#     crit_cls = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+#     crit_seg = nn.BCEWithLogitsLoss() if seg_model is not None else None
+#     seg_w    = float(cfg["training"].get("seg_loss_weight", 0.0))
+
+#     # -----------------------------------
+#     # OPTIM / SCHED / AMP
+#     # -----------------------------------
+#     lr = float(cfg["training"]["learning_rate"])
+#     wd = float(cfg["training"].get("weight_decay", 1e-4))
+#     params = list(clf.parameters()) + (list(seg_model.parameters()) if seg_model is not None else [])
+#     optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=wd)
+
+#     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+#         optimizer, mode="max", factor=0.5, patience=2, verbose=True
+#     )
+
+#     scaler = GradScaler(enabled=(device.type == "cuda"))
+
+#     # -----------------------------------
+#     # TRAIN LOOP
+#     # -----------------------------------
+#     best_score = -1.0
+#     num_epochs = int(cfg["training"]["num_epochs"])
+
+#     for epoch in range(1, num_epochs + 1):
+#         print(f"\nEpoch {epoch}/{num_epochs}")
+
+#         train_loss = train_one_epoch(
+#             clf, seg_model, train_loader, device,
+#             crit_cls, crit_seg, optimizer, scaler,
+#             seg_w=seg_w
+#         )
+
+#         metrics = validate(clf, seg_model, val_loader, device, crit_seg)
+#         acc, auc = metrics.get("accuracy"), metrics.get("auc")
+#         precision, recall, f1 = metrics.get("precision"), metrics.get("recall"), metrics.get("f1")
+#         mean_iou = metrics.get("mean_iou")
+
+#         # primary validation score:
+#         # prefer F1 only if it's > 0; otherwise use AUC, else accuracy
+#         if (f1 is not None) and (not np.isnan(f1)) and (f1 > 0.0):
+#             val_score = f1
+#         elif (auc is not None) and (not np.isnan(auc)):
+#             val_score = auc
+#         else:
+#             val_score = acc if acc is not None else 0.0
+
+#         if mean_iou is not None:
+#             print(f"TrainLoss {train_loss:.4f} | Acc {acc*100:.2f}% | AUC {auc:.4f} | "
+#                   f"P {precision:.4f} R {recall:.4f} F1 {f1:.4f} | IoU {mean_iou:.4f}")
+#         else:
+#             print(f"TrainLoss {train_loss:.4f} | Acc {acc*100:.2f}% | AUC {auc:.4f} | "
+#                   f"P {precision:.4f} R {recall:.4f} F1 {f1:.4f}")
+
+#         # save "last" every epoch
+#         torch.save(clf.state_dict(), os.path.join(model_dir, "last_classifier.pth"))
+#         if seg_model is not None:
+#             torch.save(seg_model.state_dict(), os.path.join(model_dir, "last_segmenter.pth"))
+
+#         # save best by chosen metric
+#         if val_score > best_score:
+#             best_score = val_score
+#             torch.save(clf.state_dict(), os.path.join(model_dir, "best_classifier.pth"))
+#             if seg_model is not None:
+#                 torch.save(seg_model.state_dict(), os.path.join(model_dir, "best_segmenter.pth"))
+#             print(f"✅ Saved new best (score={best_score:.4f})")
+
+#         # step ReduceLROnPlateau with the validation metric
+#         scheduler.step(val_score)
+
+#     print("\nTraining complete.")
+#     print(f"Best validation score: {best_score:.4f}")
+#     print(f"Checkpoints in: {model_dir}")
+
+
 def main():
+    import argparse, os, numpy as np, torch
+    import torch.nn as nn
+    from torch.utils.data import DataLoader
+    from torch.cuda.amp import GradScaler  # keep this to match your train/validate code
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default="config/config.yaml")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
 
-    # device & speed knobs
+    # -----------------------------
+    # Device & speed knobs
+    # -----------------------------
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.backends.cudnn.benchmark = True
     try:
-        torch.set_float32_matmul_precision("high")  # TF32 on Ada/4090
+        torch.set_float32_matmul_precision("high")  # safe no-op if unsupported
     except Exception:
         pass
 
-    # paths
+    # If CUDA exists but kernels are incompatible (e.g., RTX 5090 on old wheels), fall back to CPU.
+    if device.type == "cuda":
+        try:
+            x = torch.randn(1, 3, 8, 8, device="cuda")
+            torch.nn.Conv2d(3, 3, 3, padding=1).to("cuda")(x)
+        except Exception as e:
+            print(f"[warn] CUDA present but unusable ({e}); falling back to CPU.")
+            device = torch.device("cpu")
+
+    # -----------------------------
+    # Paths
+    # -----------------------------
     model_dir   = cfg["paths"]["model_dir"]
     results_dir = cfg["paths"]["results_dir"]
     ensure_dir(model_dir); ensure_dir(results_dir)
 
-    # data
+    # -----------------------------
+    # DATA (paired augs for train)
+    # -----------------------------
+    try:
+        import cv2, albumentations as A
+        image_size = int(cfg["data"]["image_size"])
+        tfm = A.Compose([
+            A.RandomResizedCrop(size=(image_size, image_size),
+                                scale=(0.85, 1.0), ratio=(0.9, 1.1), p=0.7),
+            # v2-safe usage (warning-only to prefer Affine; still works)
+            A.ShiftScaleRotate(shift_limit=0.02, scale_limit=0.10, rotate_limit=10,
+                               border_mode=cv2.BORDER_REFLECT_101, p=0.7),
+            A.HorizontalFlip(p=0.5),
+            A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05, p=0.4),
+        ], additional_targets={'image2': 'image'})
+    except Exception as e:
+        print(f"[warn] Albumentations not available/compatible ({e}); continuing without train-time augs.")
+        tfm = None
+        image_size = int(cfg["data"]["image_size"])
+
     train_ds = VitiligoDataset(
         csv_file=cfg["data"]["train_csv"],
         clinical_dir=cfg["data"]["clinical_dir"],
         wood_dir=cfg["data"]["wood_dir"],
         mask_dir=cfg["data"].get("mask_dir", None),
-        transform=None,
-        image_size=cfg["data"]["image_size"],
+        transform=tfm,                          # augs ON for train
+        image_size=image_size,
     )
     val_ds = VitiligoDataset(
         csv_file=cfg["data"]["val_csv"],
         clinical_dir=cfg["data"]["clinical_dir"],
         wood_dir=cfg["data"]["wood_dir"],
         mask_dir=cfg["data"].get("mask_dir", None),
-        transform=None,
-        image_size=cfg["data"]["image_size"],
+        transform=None,                         # augs OFF for val
+        image_size=image_size,
     )
 
     num_workers = int(os.environ.get("NUM_WORKERS", "8"))
+    bs          = int(cfg["training"]["batch_size"])
+    persist     = (num_workers > 0)  # must be False when num_workers==0
+
     train_loader = DataLoader(
-        train_ds, batch_size=cfg["training"]["batch_size"], shuffle=True,
-        num_workers=num_workers, pin_memory=True, persistent_workers=True
+        train_ds, batch_size=bs, shuffle=True,
+        num_workers=num_workers, pin_memory=True, persistent_workers=persist
     )
     val_loader = DataLoader(
-        val_ds, batch_size=cfg["training"]["batch_size"], shuffle=False,
-        num_workers=num_workers, pin_memory=True, persistent_workers=True
+        val_ds, batch_size=bs, shuffle=False,
+        num_workers=num_workers, pin_memory=True, persistent_workers=persist
     )
 
-    # models
+    # -----------------------------
+    # MODELS
+    # -----------------------------
     clf = DualEfficientNetClassifier(
         use_cbam=cfg["model"].get("use_cbam", False)
     ).to(device)
 
-    mask_dir = cfg["data"].get("mask_dir", None)
     seg_model = None
+    mask_dir  = cfg["data"].get("mask_dir", None)
     if mask_dir and str(mask_dir).lower() != "null":
         seg_model = DualInputSegmentationUNet(
             encoder_name=cfg["model"].get("encoder_name", "efficientnet-b0"),
             encoder_weights=cfg["model"].get("encoder_weights", "imagenet"),
         ).to(device)
 
-    # losses
-    crit_cls = nn.BCEWithLogitsLoss()
+    # -----------------------------
+    # LOSSES (class imbalance)
+    # -----------------------------
+    try:
+        import pandas as _pd
+        _df  = _pd.read_csv(cfg["data"]["train_csv"])
+        _neg = int((_df["label"] == 0).sum())
+        _pos = int((_df["label"] == 1).sum())
+        _pw  = float(_neg / max(_pos, 1)) if _pos > 0 else 1.0
+        print(f"[info] pos_weight={_pw:.3f}  (neg={_neg}, pos={_pos})")
+        pos_weight = torch.tensor([_pw], device=device)
+    except Exception as e:
+        print(f"[warn] could not compute pos_weight ({e}); using 1.0")
+        pos_weight = torch.tensor([1.0], device=device)
+
+    crit_cls = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     crit_seg = nn.BCEWithLogitsLoss() if seg_model is not None else None
-    seg_w    = float(cfg["training"].get("seg_loss_weight", 1.0))
+    seg_w    = float(cfg["training"].get("seg_loss_weight", 0.0))
 
-    # optimizer & scheduler
+    # -----------------------------
+    # OPTIM / SCHED / AMP
+    # -----------------------------
+    lr = float(cfg["training"]["learning_rate"])
+    wd = float(cfg["training"].get("weight_decay", 1e-4))
     params = list(clf.parameters()) + (list(seg_model.parameters()) if seg_model is not None else [])
-    optimizer = torch.optim.AdamW(
-        params, lr=cfg["training"]["learning_rate"],
-        weight_decay=cfg["training"].get("weight_decay", 1e-4)
-    )
+    optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=wd)
+
+    # Your torch version doesn't accept 'verbose', so omit it
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="max", factor=0.5, patience=2, verbose=True
+        optimizer, mode="max", factor=0.5, patience=2
     )
 
-    scaler = GradScaler()
-    best_score = -1.0  # we’ll track by F1 (or AUC if you prefer)
+    scaler = GradScaler(enabled=(device.type == "cuda"))
 
+    def _get_lr(opt):
+        return float(opt.param_groups[0]["lr"])
+    last_lr = _get_lr(optimizer)
+
+    # -----------------------------
+    # TRAIN LOOP
+    # -----------------------------
+    best_score = -1.0
     num_epochs = int(cfg["training"]["num_epochs"])
+
     for epoch in range(1, num_epochs + 1):
         print(f"\nEpoch {epoch}/{num_epochs}")
 
@@ -225,27 +476,31 @@ def main():
         )
 
         metrics = validate(clf, seg_model, val_loader, device, crit_seg)
-        acc, auc = metrics["accuracy"], metrics["auc"]
-        precision, recall, f1 = metrics["precision"], metrics["recall"], metrics["f1"]
-        mean_iou = metrics["mean_iou"]
+        acc, auc = metrics.get("accuracy"), metrics.get("auc")
+        precision, recall, f1 = metrics.get("precision"), metrics.get("recall"), metrics.get("f1")
+        mean_iou = metrics.get("mean_iou")
 
-        # choose primary validation score
-        val_score = f1 if not np.isnan(f1) else (auc if not np.isnan(auc) else acc)
+        # Prefer F1 only if it's > 0; otherwise use AUC; else accuracy
+        if (f1 is not None) and (not np.isnan(f1)) and (f1 > 0.0):
+            val_score = f1
+        elif (auc is not None) and (not np.isnan(auc)):
+            val_score = auc
+        else:
+            val_score = acc if acc is not None else 0.0
 
-        print(f"TrainLoss {train_loss:.4f} | "
-              f"Acc {acc*100:.2f}% | AUC {auc:.4f} | "
-              f"P {precision:.4f} R {recall:.4f} F1 {f1:.4f} | "
-              f"IoU {mean_iou:.4f}" if mean_iou is not None else
-              f"TrainLoss {train_loss:.4f} | "
-              f"Acc {acc*100:.2f}% | AUC {auc:.4f} | "
-              f"P {precision:.4f} R {recall:.4f} F1 {f1:.4f}")
+        if mean_iou is not None:
+            print(f"TrainLoss {train_loss:.4f} | Acc {acc*100:.2f}% | AUC {auc:.4f} | "
+                  f"P {precision:.4f} R {recall:.4f} F1 {f1:.4f} | IoU {mean_iou:.4f}")
+        else:
+            print(f"TrainLoss {train_loss:.4f} | Acc {acc*100:.2f}% | AUC {auc:.4f} | "
+                  f"P {precision:.4f} R {recall:.4f} F1 {f1:.4f}")
 
-        # save "last" every epoch
+        # Save "last" every epoch
         torch.save(clf.state_dict(), os.path.join(model_dir, "last_classifier.pth"))
         if seg_model is not None:
             torch.save(seg_model.state_dict(), os.path.join(model_dir, "last_segmenter.pth"))
 
-        # save best by chosen metric
+        # Save "best" by chosen metric
         if val_score > best_score:
             best_score = val_score
             torch.save(clf.state_dict(), os.path.join(model_dir, "best_classifier.pth"))
@@ -253,12 +508,16 @@ def main():
                 torch.save(seg_model.state_dict(), os.path.join(model_dir, "best_segmenter.pth"))
             print(f"✅ Saved new best (score={best_score:.4f})")
 
+        # Step LR scheduler and log LR drops
         scheduler.step(val_score)
+        new_lr = _get_lr(optimizer)
+        if new_lr < last_lr:
+            print(f"🔻 LR reduced: {last_lr:.6g} → {new_lr:.6g}")
+        last_lr = new_lr
 
     print("\nTraining complete.")
     print(f"Best validation score: {best_score:.4f}")
     print(f"Checkpoints in: {model_dir}")
-
 
 if __name__ == "__main__":
     main()

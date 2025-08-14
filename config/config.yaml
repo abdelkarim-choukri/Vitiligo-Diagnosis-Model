@@ -1,50 +1,32 @@
 # config/config.yaml
 
-# Change batch_size or learning_rate based on your GPU memory.
-
-# Set mask_dir to the path of your masks folder if you have segmentation labels; otherwise leave it null.
-
-# The scheduler block is optional—if you don’t want a learning‐rate scheduler, you can omit it or set type: none.
-
+paths:
+  model_dir:   /root/autodl-tmp/runs/models
+  results_dir: /root/autodl-tmp/runs/results
 
 data:
-  train_csv:  "data/splits/train.csv"
-  val_csv:    "data/splits/val.csv"
-  test_csv:   "data/splits/test.csv"
+  # After the next step, these files will exist:
+  train_csv: config/train_split.csv
+  val_csv:   config/val_split.csv
 
-  clinical_dir: "/root/autodl-tmp/vitiligo/clinical"
-  wood_dir:     "/root/autodl-tmp/vitiligo/wood"
+  clinical_dir: /root/autodl-tmp/vitiligo/clinical
+  wood_dir:     /root/autodl-tmp/vitiligo/wood
   mask_dir:     null
   image_size:   224
 
 model:
-  # Classification model flags
-  use_cbam:      true        # enable CBAM attention on fused features
-  # Segmentation model flags (only used if mask_dir != null)
-  encoder_name:  "efficientnet-b0"
-  encoder_weights: "imagenet"
+  use_cbam: true
+  encoder_name: efficientnet-b0
+  encoder_weights: imagenet
 
 training:
-  # Core hyperparameters
   batch_size:      16
-  learning_rate:   1e-4
-  weight_decay:    1e-4
+  num_epochs:      20
+  learning_rate:   0.0003   # number (not quoted)
+  weight_decay:    0.0001
+  seg_loss_weight: 0.0
 
-  # For combined train.py: how many epochs to run
-  num_epochs:      30
-
-  # If training the segmentation branch, weight of its loss
-  seg_loss_weight: 1.0
-
-  # Whether to shuffle training data
-  shuffle_train:   true
-
-  # Scheduler (optional)
   scheduler:
-    type:         ReduceLROnPlateau  # choices: StepLR, ReduceLROnPlateau, CosineAnnealing
-    patience:     3
-    factor:       0.5
-
-paths:
-  model_dir:   "/root/autodl-tmp/runs/models"
-  results_dir: "/root/autodl-tmp/runs/results"
+    type:     ReduceLROnPlateau
+    patience: 3
+    factor:   0.5
