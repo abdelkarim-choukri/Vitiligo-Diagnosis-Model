@@ -1,33 +1,59 @@
 import os
 import pandas as pd
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFile
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+import cv2  # robust fallback reader
+
 import torch
 from torch.utils.data import Dataset
 import torchvision.transforms as T
 
+
+def load_rgb(path: str) -> Image.Image:
+    """Robust image loader: try Pillow; fallback to OpenCV if Pillow fails."""
+    try:
+        img = Image.open(path)
+        img.load()  # force decode early
+        return img.convert('RGB')
+    except Exception:
+        arr = cv2.imread(path, cv2.IMREAD_COLOR)
+        if arr is None:
+            raise FileNotFoundError(f"Unusable image: {path}")
+        arr = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
+        return Image.fromarray(arr)
+
+
+def load_gray(path: str) -> Image.Image:
+    """Robust grayscale loader for masks (if/when you use them)."""
+    try:
+        img = Image.open(path)
+        img.load()
+        return img.convert('L')
+    except Exception:
+        arr = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+        if arr is None:
+            raise FileNotFoundError(f"Unusable mask: {path}")
+        return Image.fromarray(arr)
+
+
 class VitiligoDataset(Dataset):
     """
-    PyTorch Dataset for paired clinical and Wood's lamp images with optional segmentation masks.
+    Dataset for paired clinical and Wood's lamp images with optional masks.
 
-    Expects a CSV with columns: ['clinical_filename', 'wood_filename', 'label']
-    Optionally, if mask_dir is provided and the CSV has 'mask_filename', it will load masks.
-
-    Args:
-        csv_file (str): Path to the CSV file.
-        clinical_dir (str): Directory containing clinical images.
-        wood_dir (str): Directory containing Wood's lamp images.
-        mask_dir (str, optional): Directory containing mask images. Defaults to None.
-        transform (albumentations.Compose, optional): Joint augmentation for images/mask. Defaults to None.
-        image_size (int, optional): Resize images/masks to this size. Defaults to 224.
+    CSV columns required: ['clinical_filename', 'wood_filename', 'label']
+    Optional: 'mask_filename' (used only if mask_dir is provided)
     """
+
     def __init__(self, csv_file, clinical_dir, wood_dir, mask_dir=None, transform=None, image_size=224):
         self.df = pd.read_csv(csv_file)
         self.clinical_dir = clinical_dir
         self.wood_dir = wood_dir
         self.mask_dir = mask_dir
         self.transform = transform
-        # torchvision transforms for resizing, tensor conversion, and normalization
+
+        # torchvision transforms
         self.resize = T.Resize((image_size, image_size))
         self.to_tensor = T.ToTensor()
         self.normalize = T.Normalize(mean=[0.485, 0.456, 0.406],
@@ -38,46 +64,48 @@ class VitiligoDataset(Dataset):
 
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
-        # Build file paths
-        cli_path = os.path.join(self.clinical_dir, row['clinical_filename'])
-        woo_path = os.path.join(self.wood_dir, row['wood_filename'])
+
+        # Build absolute paths
+        cli_path = os.path.join(self.clinical_dir, str(row['clinical_filename']).strip())
+        woo_path = os.path.join(self.wood_dir,     str(row['wood_filename']).strip())
         label = int(row['label'])
 
-        # Load images
-        cli_img = Image.open(cli_path).convert('RGB')
-        woo_img = Image.open(woo_path).convert('RGB')
+        # Robust load
+        cli_img = load_rgb(cli_path)
+        woo_img = load_rgb(woo_path)
 
-        # Load mask if available
+        # Optional mask
         mask = None
-        if self.mask_dir and 'mask_filename' in row and pd.notna(row['mask_filename']):
-            mask_path = os.path.join(self.mask_dir, row['mask_filename'])
-            mask = Image.open(mask_path).convert('L')
+        if self.mask_dir and ('mask_filename' in self.df.columns) and pd.notna(row.get('mask_filename', None)):
+            mask_path = os.path.join(self.mask_dir, str(row['mask_filename']).strip())
+            mask = load_gray(mask_path)
 
-        # Apply joint augmentations if provided (expects albumentations)
-        if self.transform:
-            # Prepare dict for albumentations
+        # Joint albumentations (if provided): expects additional_targets={"image2":"image","mask":"mask"}
+        if self.transform is not None:
             data = {'image': np.array(cli_img), 'image2': np.array(woo_img)}
             if mask is not None:
                 data['mask'] = np.array(mask)
-            augmented = self.transform(**data)
-            cli_img = Image.fromarray(augmented['image'])
-            woo_img = Image.fromarray(augmented['image2'])
+            aug = self.transform(**data)
+            cli_img = Image.fromarray(aug['image'])
+            woo_img = Image.fromarray(aug['image2'])
             if mask is not None:
-                mask = Image.fromarray(augmented['mask'])
+                mask = Image.fromarray(aug['mask'])
 
-        # Resize, to tensor, normalize
+        # Resize + to tensor + normalize
         cli_img = self.resize(cli_img)
         woo_img = self.resize(woo_img)
         cli_tensor = self.normalize(self.to_tensor(cli_img))
         woo_tensor = self.normalize(self.to_tensor(woo_img))
 
-        # Process mask to tensor
+        # Mask tensor (placeholder if None)
         if mask is not None:
             mask = self.resize(mask)
-            mask_arr = np.array(mask).astype('float32') / 255.0
-            mask_tensor = torch.from_numpy(mask_arr).unsqueeze(0)
+            mask_arr = (np.array(mask).astype('float32') / 255.0)
+            mask_tensor = torch.from_numpy(mask_arr).unsqueeze(0)  # [1,H,W]
         else:
-            mask_tensor = torch.tensor(0.)  # placeholder
+            mask_tensor = torch.tensor(0.0)  # scalar placeholder; unused when seg is off
 
-        label_tensor = torch.tensor(label, dtype=torch.long)
+        # Use float label to match BCEWithLogitsLoss input
+        label_tensor = torch.tensor(label, dtype=torch.float32)
+
         return cli_tensor, woo_tensor, mask_tensor, label_tensor

@@ -1,0 +1,21 @@
+{
+  "decision_threshold": Infinity,
+  "target_specificity": 0.9,
+  "achieved_specificity": 1.0,
+  "achieved_sensitivity": 0.0,
+  "roc_auc": 0.564516129032258,
+  "pr_auc": 0.21257631257631257,
+  "tpr_at_choice": 0.0,
+  "spec_at_choice": 1.0,
+  "confusion_matrix": [
+    [
+      31,
+      0
+    ],
+    [
+      6,
+      0
+    ]
+  ],
+  "n_samples": 37
+}
